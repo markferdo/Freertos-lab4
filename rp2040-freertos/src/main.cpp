@@ -94,7 +94,6 @@ struct SystemObjects {
     EventGroupHandle_t ev;
 };
 
-
 void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3, SystemObjects *s) {
     debugEvent e;
     e.format = format;
@@ -130,7 +129,7 @@ void task2(void *pvParameters) {
     TickType_t last = xTaskGetTickCount();
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 1000))); // 1–2 sec delay
+        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 1000)));
         TickType_t now = xTaskGetTickCount();
         debug("Task 2 running, elapsed: %lu ticks\n", (uint32_t)(now - last), 0, 0, s);
         last = now;
