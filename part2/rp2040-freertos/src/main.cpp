@@ -81,7 +81,10 @@ void assign_pin(const uint pin) {
 
 #define DEBUG_QUEUE_LENGTH 16
 #define DEBUG_BUFFER_SIZE 64
-#define BUTTON_BIT (1 << 0)
+//#define BUTTON_BIT (1 << 0)
+#define TASK1_BIT (1 << 0)
+#define TASK2_BIT (1 << 1)
+#define TASK3_BIT (1 << 2)
 
 struct debugEvent {
     const char *format;
@@ -94,6 +97,12 @@ struct SystemObjects {
     EventGroupHandle_t ev;
 };
 
+struct ButtonTaskParams{
+    SystemObjects *sys;
+    uint gpio;
+    uint32_t bit;
+    uint taskNum;
+};
 
 void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3, SystemObjects *s) {
     debugEvent e;
@@ -104,51 +113,6 @@ void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3, SystemObje
     e.timestamp = xTaskGetTickCount();
 
     xQueueSend(s->syslog_q, &e, portMAX_DELAY);
-}
-
-void task1(void *pvParameters) {
-    SystemObjects *s = (SystemObjects *)pvParameters;
-    bool last_pressed = false;
-
-    while (1) {
-        bool pressed = (gpio_get(BUTTON_PIN1) == 0);
-
-        if (pressed && !last_pressed) {
-            debug("Button pressed, set bit 0\n", 0, 0, 0, s);
-            xEventGroupSetBits(s->ev, BUTTON_BIT);
-        }
-
-        last_pressed = pressed;
-        vTaskDelay(pdMS_TO_TICKS(50)); // poll every 50ms
-    }
-}
-
-void task2(void *pvParameters) {
-    SystemObjects *s = (SystemObjects *)pvParameters;
-
-    xEventGroupWaitBits(s->ev, BUTTON_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    TickType_t last = xTaskGetTickCount();
-
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 1000))); // 1–2 sec delay
-        TickType_t now = xTaskGetTickCount();
-        debug("Task 2 running, elapsed: %lu ticks\n", (uint32_t)(now - last), 0, 0, s);
-        last = now;
-    }
-}
-
-void task3(void *pvParameters) {
-    SystemObjects *s = (SystemObjects *)pvParameters;
-
-    xEventGroupWaitBits(s->ev, BUTTON_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    TickType_t last = xTaskGetTickCount();
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000 + (rand() % 1000)));
-        TickType_t now = xTaskGetTickCount();
-        debug("Task 3 running, elapsed: %lu ticks\n", (uint32_t)(now - last), 0, 0, s);
-        last = now;
-    }
 }
 
 void debugTask(void *pvParameters) {
@@ -163,6 +127,58 @@ void debugTask(void *pvParameters) {
         }
     }
 }
+
+void watchdogTask(void *pvParameters) {
+    struct SystemObjects *s = (struct SystemObjects *)pvParameters;
+    TickType_t last = xTaskGetTickCount();
+
+    while (1) {
+        EventBits_t bits = xEventGroupWaitBits(
+            s->ev,
+            TASK1_BIT | TASK2_BIT | TASK3_BIT,
+            pdTRUE,   // clear on exit
+            pdTRUE,   // wait for ALL
+            pdMS_TO_TICKS(30000)
+        );
+
+        if ((bits & (TASK1_BIT | TASK2_BIT | TASK3_BIT)) ==
+            (TASK1_BIT | TASK2_BIT | TASK3_BIT)) {
+            TickType_t now = xTaskGetTickCount();
+            debug("Watchdog: OK, elapsed %lu ticks\n", (uint32_t)(now - last), 0, 0, s);
+            last = now;
+            } else {
+                debug("Watchdog: FAIL, missing tasks:\n", 0, 0, 0, s);
+                if (!(bits & TASK1_BIT)) {
+                    debug("  Task1\n", 0, 0, 0, s);
+                }
+                if (!(bits & TASK2_BIT)) {
+                    debug("  Task2\n", 0, 0, 0, s);
+                }
+                if (!(bits & TASK3_BIT)) {
+                    debug("  Task3\n", 0, 0, 0, s);
+                }
+                debug("Watchdog suspending itself after FAIL\n", 0, 0, 0,s);
+                vTaskSuspend(NULL);
+            }
+    }
+}
+
+
+void buttonTask(void *pvParameters) {
+    ButtonTaskParams *p = (ButtonTaskParams *)pvParameters;
+    bool last_pressed = false;
+
+    while (1) {
+        bool pressed = (gpio_get(p->gpio) == 0);
+
+        if (!pressed && last_pressed) {
+            xEventGroupSetBits(p->sys->ev, p->bit);
+            debug("Task %d button released -> set bit\n", p->taskNum, 0, 0, p->sys);
+        }
+        last_pressed = pressed;
+        vTaskDelay(pdMS_TO_TICKS(50)); // debounce
+    }
+}
 //lab4 ends
 
 int main()
@@ -173,18 +189,36 @@ int main()
     gpio_init(LED_PIN1);
     gpio_set_dir(LED_PIN1, true);
 
+    gpio_init(BUTTON_PIN0);
+    gpio_set_dir(BUTTON_PIN0, false);
+    gpio_pull_up(BUTTON_PIN0);
+
     gpio_init(BUTTON_PIN1);
-    gpio_set_dir(BUTTON_PIN1, false); // input
+    gpio_set_dir(BUTTON_PIN1, false);
     gpio_pull_up(BUTTON_PIN1);
+
+    gpio_init(BUTTON_PIN2);
+    gpio_set_dir(BUTTON_PIN2, false);
+    gpio_pull_up(BUTTON_PIN2);
 
     SystemObjects sys;
 
     sys.syslog_q = xQueueCreate(16, sizeof(debugEvent));
     sys.ev = xEventGroupCreate();
 
-    xTaskCreate(task1, "Task1", 512, &sys, tskIDLE_PRIORITY + 2, NULL);
-    xTaskCreate(task2, "Task2", 512, &sys, tskIDLE_PRIORITY + 3, NULL);
-    xTaskCreate(task3, "Task3", 512, &sys, tskIDLE_PRIORITY + 3, NULL);
+    static ButtonTaskParams p1, p2, p3;
+    p1 = (ButtonTaskParams){ &sys, BUTTON_PIN0, TASK1_BIT, 1 };
+    p2 = (ButtonTaskParams){ &sys, BUTTON_PIN1, TASK2_BIT, 2 };
+    p3 = (ButtonTaskParams){ &sys, BUTTON_PIN2, TASK3_BIT, 3 };
+
+    xTaskCreate(buttonTask, "Task1", 512, &p1, tskIDLE_PRIORITY + 3, NULL);
+    xTaskCreate(buttonTask, "Task2", 512, &p2, tskIDLE_PRIORITY + 3, NULL);
+    xTaskCreate(buttonTask, "Task3", 512, &p3, tskIDLE_PRIORITY + 3, NULL);
+
+    // Watchdog task
+    xTaskCreate(watchdogTask, "Watchdog", 512, &sys, tskIDLE_PRIORITY + 2, NULL);
+
+    // Debug task (lowest priority)
     xTaskCreate(debugTask, "DebugTask", 512, &sys, tskIDLE_PRIORITY + 1, NULL);
 
     vTaskStartScheduler();
